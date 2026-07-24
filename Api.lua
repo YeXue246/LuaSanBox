@@ -572,6 +572,31 @@ function Api.GetRegionData(data)
     return backeTable
 end
 
+function Api.CommandModel(data)
+    local backeTable = Api.Object:CommandModel(data)
+    return backeTable, true
+end
+
+function Api.CommandAddModel(data)
+    local backeTable = Api.Object:CommandAddModel(data)
+    return backeTable, true
+end
+
+function Api.CommandDeleteModel(data)
+    local backeTable = Api.Object:CommandDeleteModel(data)
+    return backeTable, true
+end
+
+function Api.CommandSelectModel(data)
+    local backeTable = Api.Object:CommandSelectModel(data)
+    return backeTable, true
+end
+
+function Api.CommandSetModelTransform(data)
+    local backeTable = Api.Object:CommandSetModelTransform(data)
+    return backeTable, true
+end
+
 function Api.CommunicationCleanup(functionName)
     Api.Object:CommunicationCleanup(functionName)
 end
