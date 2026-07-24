@@ -1038,6 +1038,219 @@ function M:DeleteModel(dataTable)
     self.control:DeleteModel()
 end
 
+
+------------------------- 指令式模型操作 ---------------------------
+-- 以下接口用于外部通过通信指令直接操作模型，不依赖鼠标拖拽。
+-- 通用 ID 说明：传模型树中的 ID/modelName/name 均可；如传父级分组 ID，会自动选中其首个子模型。
+
+local function SandboxCommandVector(data, prefix, fallback)
+    data = data or {}
+    fallback = fallback or UE.FVector(0, 0, 0)
+    if type(data[prefix]) == "table" then
+        local t = data[prefix]
+        return UE.FVector(t.x or t.X or fallback.X, t.y or t.Y or fallback.Y, t.z or t.Z or fallback.Z)
+    end
+    return UE.FVector(data[prefix .. "X"] or data.x or data.X or fallback.X,
+        data[prefix .. "Y"] or data.y or data.Y or fallback.Y,
+        data[prefix .. "Z"] or data.z or data.Z or fallback.Z)
+end
+
+local function SandboxCommandNumber(value, fallback)
+    if value == nil or value == "" then
+        return fallback
+    end
+    return tonumber(value) or fallback
+end
+
+--- 根据指令数据查找模型 Actor。
+--- @param dataTable table|string 模型 ID 字符串，或 { ID/modelId/modelName/name = "模型ID" }
+--- @return UE.AActor|nil actor 找到的模型 Actor；若传入分组 Actor，则返回其第一个子 Actor
+function M:CommandFindModelActor(dataTable)
+    local actorId = dataTable
+    if type(dataTable) == "table" then
+        actorId = dataTable.ID or dataTable.id or dataTable.modelId or dataTable.modelName or dataTable.name
+    end
+    if not (self.control and self.control.modelManage and actorId) then
+        return nil
+    end
+
+    local actor = self.control.modelManage:FindActor(actorId, true)
+    if actor and not actor.bGroup then
+        local children = actor:GetAttachedActors()
+        actor = children and children[1] or actor
+    end
+    return actor
+end
+
+--- 指令选中模型。
+--- @param dataTable table|string 模型 ID 字符串，或 { ID/modelId/modelName/name = "模型ID" }
+--- @return table { ok: boolean, ID: string|nil, message: string }
+function M:CommandSelectModel(dataTable)
+    local actorId = dataTable
+    if type(dataTable) == "table" then
+        actorId = dataTable.ID or dataTable.id or dataTable.modelId or dataTable.modelName or dataTable.name
+    end
+    if not actorId then
+        return { ok = false, message = "缺少模型ID参数：ID/modelId/modelName/name" }
+    end
+
+    local actor = self:CommandFindModelActor(actorId)
+    if not actor then
+        return { ok = false, ID = actorId, message = "未找到模型" }
+    end
+
+    self.control.bBuild = false
+    if self.control.modelManage.ModelSelect[actor.modelType] then
+        self.control.modelManage.ModelSelect[actor.modelType](actor, self.control)
+    else
+        self.control.modelManage.ModelSelect["default"](actor, self.control)
+    end
+    if self.control.ModelDataToView then
+        self.control:ModelDataToView(true)
+    end
+    return { ok = true, ID = actorId, message = "模型已选中" }
+end
+
+--- 指令新增模型。
+--- @param dataTable table 参数：
+---   - modelCode: string 必填，模型编码；
+---   - showName/showname: string 可选，显示名称；
+---   - modelUrl: string 可选，外部模型下载地址；
+---   - modelCategoryCode: string 可选，模型分类编码；
+---   - isAnimation: boolean 可选，是否动画模型；
+---   - x/y/z 或 location={x,y,z}: number 可选，生成后位置；
+---   - angle 或 rotation={z/yaw}: number 可选，Yaw 角度；
+---   - length/width/height 或 size={x,y,z}: number 可选，目标尺寸。
+--- @return table { ok: boolean, result: any, modelName: string|nil, message: string }
+function M:CommandAddModel(dataTable)
+    dataTable = dataTable or {}
+    if not dataTable.modelCode then
+        return { ok = false, message = "缺少必填参数 modelCode" }
+    end
+
+    local showName = dataTable.showName or dataTable.showname or dataTable.modelCode
+    local result = self.control:CreateModel(dataTable.modelCode, showName, dataTable.modelUrl,
+        dataTable.modelCategoryCode, dataTable.isAnimation)
+    if result == "UnDownload" or result == "ModelResourceNotLoaded" or result == "NoCurrentFloor" then
+        return { ok = false, result = result, message = "模型创建失败或需要先下载资源" }
+    end
+
+    if self.control.buildActor then
+        self:CommandSetModelTransform(dataTable)
+        local modelName = Model.GetActorAccurateDisplayName(self.control.buildActor)
+        return { ok = true, result = result, modelName = modelName, message = "模型已新增" }
+    end
+    return { ok = true, result = result, message = "模型创建指令已发送" }
+end
+
+--- 指令删除模型。
+--- @param dataTable table|string 参数：模型 ID 字符串，或 { ID/modelId/modelName/name = "模型ID" }，或 { ids = {"ID1", "ID2"} }；不传 ID 时删除当前选中模型。
+--- @return table { ok: boolean, deleted: table, failed: table }
+function M:CommandDeleteModel(dataTable)
+    local ids = {}
+    if type(dataTable) == "table" and type(dataTable.ids) == "table" then
+        ids = dataTable.ids
+    else
+        local actorId = type(dataTable) == "table" and (dataTable.ID or dataTable.id or dataTable.modelId or dataTable.modelName or dataTable.name) or dataTable
+        if actorId then
+            table.insert(ids, actorId)
+        end
+    end
+
+    local deleted, failed = {}, {}
+    if #ids == 0 then
+        self.control:DeleteModel()
+        return { ok = true, deleted = deleted, failed = failed, message = "已删除当前选中模型" }
+    end
+
+    for _, actorId in ipairs(ids) do
+        local sel = self:CommandSelectModel({ ID = actorId })
+        if sel.ok then
+            self.control:DeleteModel()
+            table.insert(deleted, actorId)
+        else
+            table.insert(failed, { ID = actorId, message = sel.message })
+        end
+    end
+    return { ok = #failed == 0, deleted = deleted, failed = failed }
+end
+
+--- 指令设置模型位置、大小和缩放。
+--- @param dataTable table 参数：
+---   - ID/modelId/modelName/name: string 可选，目标模型ID；不传则操作当前选中/正在创建的模型；
+---   - x/y/z 或 location={x,y,z}: number 可选，世界坐标；
+---   - angle 或 yaw 或 rotation={z/yaw}: number 可选，Yaw 角度；
+---   - length/width/height 或 size={x,y,z}: number 可选，目标显示尺寸；
+---   - scale 或 scale3D={x,y,z}: number|table 可选，按当前尺寸乘以缩放系数；
+---   - showName/showname: string 可选，显示名称。
+--- @return table { ok: boolean, message: string }
+function M:CommandSetModelTransform(dataTable)
+    dataTable = dataTable or {}
+    local actorId = dataTable.ID or dataTable.id or dataTable.modelId or dataTable.modelName or dataTable.name
+    if actorId then
+        local sel = self:CommandSelectModel({ ID = actorId })
+        if not sel.ok then
+            return sel
+        end
+    end
+
+    local actor = self.control and self.control.buildActor
+    if not actor then
+        return { ok = false, message = "没有可操作模型，请传入有效ID或先新增/选中模型" }
+    end
+
+    local currentTransform = actor:GetTransform()
+    local currentSize = actor.size or dataTable.Size or UE.FVector(100, 100, 100)
+    local location = SandboxCommandVector(dataTable, "location", currentTransform.Translation)
+    local rot = dataTable.rotation or {}
+    local yaw = SandboxCommandNumber(dataTable.angle or dataTable.yaw or rot.z or rot.Z or rot.yaw,
+        UE.UKismetMathLibrary.Quat_Rotator(currentTransform.Rotation).Yaw)
+    local transform = UE.UKismetMathLibrary.Conv_RotatorToTransform(UE.FRotator(0, yaw, 0))
+    transform.Translation = location
+
+    local size = dataTable.Size or dataTable.size
+    if type(size) == "table" then
+        size = UE.FVector(size.x or size.X or currentSize.X, size.y or size.Y or currentSize.Y, size.z or size.Z or currentSize.Z)
+    else
+        size = UE.FVector(dataTable.length or currentSize.X, dataTable.width or currentSize.Y, dataTable.height or currentSize.Z)
+    end
+
+    local scale = dataTable.scale or dataTable.scale3D
+    if type(scale) == "table" then
+        size = UE.FVector(size.X * (scale.x or scale.X or 1), size.Y * (scale.y or scale.Y or 1), size.Z * (scale.z or scale.Z or 1))
+    elseif scale then
+        scale = tonumber(scale) or 1
+        size = size * scale
+    end
+
+    self.control:ModelDataToModel({
+        T = transform,
+        Size = size,
+        showname = dataTable.showName or dataTable.showname or actor.showName or (actor:GetAttachParentActor() and actor:GetAttachParentActor().showName)
+    })
+    self.control:ModelDataToView(true)
+    self:PushAISceneDelta("model.commandTransform", { modelId = actorId, refreshTree = true })
+    return { ok = true, ID = actorId, message = "模型变换已更新" }
+end
+
+--- 指令统一入口。
+--- @param dataTable table { action: "add"|"delete"|"select"|"transform", ... }
+--- @return table 指令执行结果
+function M:CommandModel(dataTable)
+    dataTable = dataTable or {}
+    local action = dataTable.action or dataTable.command or dataTable.type
+    if action == "add" or action == "create" then
+        return self:CommandAddModel(dataTable)
+    elseif action == "delete" or action == "remove" then
+        return self:CommandDeleteModel(dataTable)
+    elseif action == "select" then
+        return self:CommandSelectModel(dataTable)
+    elseif action == "transform" or action == "setTransform" or action == "move" or action == "resize" or action == "scale" then
+        return self:CommandSetModelTransform(dataTable)
+    end
+    return { ok = false, message = "未知模型指令 action: " .. tostring(action) }
+end
+
 -- 处理楼层信息的函数
 function M:FloorInfo(dataTable)
     local T = self.control:FloorDataToModel(dataTable)
